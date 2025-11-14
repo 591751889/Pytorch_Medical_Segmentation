@@ -3,7 +3,7 @@ import os
 
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-devicess = [0]
+devices = [0]
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import argparse
@@ -73,14 +73,16 @@ def _min_max_norm(t: torch.Tensor) -> torch.Tensor:
     return (t - t_min) / (t_max - t_min + 1e-8)
 
 
-def validate(epoch,model,val_loader,criterion,hp,metric,device: str = "cuda",save_outputs: bool = False,
-):
+def validate(epoch, model, val_loader, criterion, hp, metric, device: str = "cuda", save_outputs: bool = False):
     """
     Run one full pass on the validation set.
 
     Returns
     -------
-    (val_loss, val_dice, val_iou, val_precision, val_recall, val_FPR, val_FNR)
+    dict: Dictionary containing the averaged metrics:
+        {
+            'loss', 'dice', 'iou', 'precision', 'recall', 'FPR', 'FNR', 'acc', 'tp', 'fp', 'fn', 'tn'
+        }
     """
     model.eval()
 
@@ -92,6 +94,16 @@ def validate(epoch,model,val_loader,criterion,hp,metric,device: str = "cuda",sav
         "recall": 0.0,
         "FPR": 0.0,
         "FNR": 0.0,
+        "acc": 0.0,
+        "tp": 0.0,
+        "fp": 0.0,
+        "fn": 0.0,
+        "tn": 0.0,
+        "specificity": 0.0,
+        "NPV": 0.0,
+        "f1": 0.0,
+        "balanced_acc": 0.0,
+        "MCC": 0.0,
     }
     num_iters = 0
 
@@ -123,18 +135,27 @@ def validate(epoch,model,val_loader,criterion,hp,metric,device: str = "cuda",sav
             logits = torch.sigmoid(outputs)
             labels = (logits > 0.5).float()  # 预测掩膜 (B, 1, H, W)
 
-            # ── 统计指标 ───────────────────────────────────────────────────────
-            dice, iou, precision, recall, FPR, FNR = metric(
-                y.cpu(), labels.cpu()
-            )
+            # ── 统计所有指标 ───────────────────────────────────────────────────────
+            metrics = metric(y.cpu(), labels.cpu())  # 获取所有指标字典
 
+            # 累加各指标值
             totals["loss"] += loss.item()
-            totals["dice"] += dice
-            totals["iou"] += iou
-            totals["precision"] += precision
-            totals["recall"] += recall
-            totals["FPR"] += FPR
-            totals["FNR"] += FNR
+            totals["dice"] += metrics["dice"]
+            totals["iou"] += metrics["iou"]
+            totals["precision"] += metrics["precision"]
+            totals["recall"] += metrics["recall"]
+            totals["FPR"] += metrics["FPR"]
+            totals["FNR"] += metrics["FNR"]
+            totals["acc"] += metrics["acc"]
+            totals["tp"] += metrics["tp"]
+            totals["fp"] += metrics["fp"]
+            totals["fn"] += metrics["fn"]
+            totals["tn"] += metrics["tn"]
+            totals["specificity"] += metrics["specificity"]
+            totals["NPV"] += metrics["NPV"]
+            totals["f1"] += metrics["f1"]
+            totals["balanced_acc"] += metrics["balanced_acc"]
+            totals["MCC"] += metrics["MCC"]
             num_iters += 1
 
             # ── 可选保存输出 ───────────────────────────────────────────────────
@@ -159,15 +180,15 @@ def validate(epoch,model,val_loader,criterion,hp,metric,device: str = "cuda",sav
     for k in totals:
         totals[k] /= num_iters
 
-    return (
-        totals["loss"],
-        totals["dice"],
-        totals["iou"],
-        totals["precision"],
-        totals["recall"],
-        totals["FPR"],
-        totals["FNR"],
-    )
+    # 返回所有计算后的指标，包括准确率和其他详细统计
+    return totals
+
+
+import os
+import torch
+from torch.optim.lr_scheduler import StepLR
+from torch.utils.tensorboard import SummaryWriter
+import argparse
 
 
 def train(model, optimizer):
@@ -182,7 +203,7 @@ def train(model, optimizer):
     os.makedirs(args.log_dir, exist_ok=True)
 
     # 修正: devicess -> devices
-    model = torch.nn.DataParallel(model, device_ids=devicess)
+    model = torch.nn.DataParallel(model, device_ids=devices)
 
     scheduler = StepLR(optimizer, step_size=hp.scheduer_step_size, gamma=hp.scheduer_gamma)
 
@@ -205,7 +226,6 @@ def train(model, optimizer):
     else:
         elapsed_epochs = 0
 
-    # 允许从参数/外部指定初始 best_dice，否则置为 -inf
     best_dice = getattr(args, "best_dice", float("-inf"))
     model.cuda()
     writer = SummaryWriter(args.log_dir)
@@ -214,7 +234,6 @@ def train(model, optimizer):
     epochs = args.epochs - elapsed_epochs
     iteration = elapsed_epochs * len(train_loader)
 
-    # 新增: 用于返回的“最好epoch指标”容器
     best_metrics = {
         "epoch": None,
         "val_loss": None,
@@ -224,7 +243,13 @@ def train(model, optimizer):
         "val_recall": None,
         "val_FPR": None,
         "val_FNR": None,
-        "ckpt_path": None,   # 可选: 保存当时的 best 模型路径
+        "val_acc": None,
+        "val_specificity": None,
+        "val_NPV": None,
+        "val_f1": None,
+        "val_balanced_acc": None,
+        "val_MCC": None,
+        "ckpt_path": None,
     }
 
     for epoch in range(1, epochs + 1):
@@ -247,7 +272,6 @@ def train(model, optimizer):
                 y_atery = batch['atery']['data']
                 y_lung = batch['lung']['data']
                 y_trachea = batch['trachea']['data']
-                # 修正: y_vein 不应来自 'atery'
                 y_vein = batch['vein']['data']
 
                 x = x.type(torch.FloatTensor).cuda()
@@ -260,7 +284,7 @@ def train(model, optimizer):
                 y[y != 0] = 1
                 if x.shape[1] == 1:  # 假设通道维度在 dim=1
                     x = x.repeat(1, 3, 1, 1)
-            
+
             outputs = model(x)
 
             logits = torch.sigmoid(outputs)
@@ -276,13 +300,40 @@ def train(model, optimizer):
             optimizer.step()
             iteration += 1
 
-            dice, iou, precision, recall, FPR, FNR = metric(y.cpu(), labels.cpu())
+            # 获取所有的指标
+            m = metric(y.cpu(), labels.cpu())
 
+            dice = m["dice"]
+            iou = m["iou"]
+            precision = m["precision"]
+            recall = m["recall"]
+            FPR = m["FPR"]
+            FNR = m["FNR"]
+            acc = m["acc"]
+            specificity = m["specificity"]
+            npv = m["NPV"]
+            f1 = m["f1"]
+            balanced_acc = m["balanced_acc"]
+            mcc = m["MCC"]
+            tp = m["tp"]
+            fp = m["fp"]
+            fn = m["fn"]
+            tn = m["tn"]
+
+            # 将指标写入 tensorboard
             writer.add_scalar('Training/Loss', loss.item(), iteration)
             writer.add_scalar('Training/FPR', FPR, iteration)
             writer.add_scalar('Training/FNR', FNR, iteration)
             writer.add_scalar('Training/dice', dice, iteration)
             writer.add_scalar('Training/iou', iou, iteration)
+            writer.add_scalar('Training/precision', precision, iteration)
+            writer.add_scalar('Training/recall', recall, iteration)
+            writer.add_scalar('Training/acc', acc, iteration)
+            writer.add_scalar('Training/specificity', specificity, iteration)
+            writer.add_scalar('Training/NPV', npv, iteration)
+            writer.add_scalar('Training/f1', f1, iteration)
+            writer.add_scalar('Training/balanced_acc', balanced_acc, iteration)
+            writer.add_scalar('Training/MCC', mcc, iteration)
 
         scheduler.step()
 
@@ -293,30 +344,34 @@ def train(model, optimizer):
             os.path.join(args.log_dir, args.latest_checkpoint_file)
         )
 
-        # Save checkpoint + 验证与“最好指标”更新
         if epoch % args.epochs_per_checkpoint == 0:
             model.eval()
-            (val_loss, val_dice, val_iou, val_precision, val_recall, val_FPR, val_FNR) = (
-                validate(epoch, model, val_loader, criterion, hp, metric, device="cuda")
-            )
+            val_metrics = validate(epoch, model, val_loader, criterion, hp, metric, device="cuda")
 
             print(f"[Epoch {epoch}] "
-                  f"loss={val_loss:.4f}, "
-                  f"dice={val_dice:.4f}, "
-                  f"iou={val_iou:.4f}")
+                  f"loss={val_metrics['loss']:.4f}, "
+                  f"dice={val_metrics['dice']:.4f}, "
+                  f"iou={val_metrics['iou']:.4f}")
 
-            writer.add_scalar('Validation/val_loss', val_loss, epoch)
-            writer.add_scalar('Validation/val_dice', val_dice, epoch)
-            writer.add_scalar('Validation/val_iou', val_iou, epoch)
-            writer.add_scalar('Validation/val_precision', val_precision, epoch)
-            writer.add_scalar('Validation/val_recall', val_recall, epoch)
-            writer.add_scalar('Validation/val_FNR', val_FNR, epoch)
-            writer.add_scalar('Validation/val_FPR', val_FPR, epoch)
+            # 将验证结果写入 tensorboard
+            writer.add_scalar('Validation/val_loss', val_metrics["loss"], epoch)
+            writer.add_scalar('Validation/val_dice', val_metrics["dice"], epoch)
+            writer.add_scalar('Validation/val_iou', val_metrics["iou"], epoch)
+            writer.add_scalar('Validation/val_precision', val_metrics["precision"], epoch)
+            writer.add_scalar('Validation/val_recall', val_metrics["recall"], epoch)
+            writer.add_scalar('Validation/val_FNR', val_metrics["FNR"], epoch)
+            writer.add_scalar('Validation/val_FPR', val_metrics["FPR"], epoch)
+            writer.add_scalar('Validation/val_acc', val_metrics["acc"], epoch)
+            writer.add_scalar('Validation/val_specificity', val_metrics["specificity"], epoch)
+            writer.add_scalar('Validation/val_NPV', val_metrics["NPV"], epoch)
+            writer.add_scalar('Validation/val_f1', val_metrics["f1"], epoch)
+            writer.add_scalar('Validation/val_balanced_acc', val_metrics["balanced_acc"], epoch)
+            writer.add_scalar('Validation/val_MCC', val_metrics["MCC"], epoch)
 
             # 如果更好，保存 best，并记录“最好epoch的所有指标”
-            if val_dice > best_dice:
-                print(f"Dice improved from {best_dice:.4f} to {val_dice:.4f}. Saving best model...")
-                best_dice = val_dice
+            if val_metrics["dice"] > best_dice:
+                print(f"Dice improved from {best_dice:.4f} to {val_metrics['dice']:.4f}. Saving best model...")
+                best_dice = val_metrics["dice"]
                 best_path = os.path.join(args.log_dir, "best_dice_model.pt")
                 torch.save(
                     {
@@ -328,21 +383,32 @@ def train(model, optimizer):
                 )
                 best_metrics.update({
                     "epoch": epoch,
-                    "val_loss": float(val_loss),
-                    "val_dice": float(val_dice),
-                    "val_iou": float(val_iou),
-                    "val_precision": float(val_precision),
-                    "val_recall": float(val_recall),
-                    "val_FPR": float(val_FPR),
-                    "val_FNR": float(val_FNR),
+                    "val_loss": float(val_metrics["loss"]),
+                    "val_dice": float(val_metrics["dice"]),
+                    "val_iou": float(val_metrics["iou"]),
+                    "val_precision": float(val_metrics["precision"]),
+                    "val_recall": float(val_metrics["recall"]),
+                    "val_FPR": float(val_metrics["FPR"]),
+                    "val_FNR": float(val_metrics["FNR"]),
+                    "val_acc": float(val_metrics["acc"]),
+                    "val_specificity": float(val_metrics["specificity"]),
+                    "val_NPV": float(val_metrics["NPV"]),
+                    "val_f1": float(val_metrics["f1"]),
+                    "val_balanced_acc": float(val_metrics["balanced_acc"]),
+                    "val_MCC": float(val_metrics["MCC"]),
+
+                    # TP/FP/FN/TN 也保存（你后面分析可能需要）
+                    "val_tp": float(val_metrics["tp"]),
+                    "val_fp": float(val_metrics["fp"]),
+                    "val_fn": float(val_metrics["fn"]),
+                    "val_tn": float(val_metrics["tn"]),
+
                     "ckpt_path": best_path,
                 })
 
     writer.close()
 
-    # 返回“表现最好的 epoch 的所有指标”（按 dice 判定）
     return best_metrics
-
 
 
 def test(model):
@@ -357,7 +423,7 @@ def test(model):
 
     os.makedirs(output_dir_test, exist_ok=True)
 
-    model = torch.nn.DataParallel(model, device_ids=devicess)
+    model = torch.nn.DataParallel(model, device_ids=devices)
 
     print("load model:", args.ckpt)
     print(os.path.join(args.log_dir, args.best_dice_model_file))
@@ -617,24 +683,11 @@ if __name__ == '__main__':
        
         if hp.train_or_test == 'train':
             best_metrics = train(model, optimizer)
-            csv_path = hp.source_train_dir+'.csv'
+            csv_path = hp.source_train_dir+'ans.csv'
             save_metrics_to_csv(model_name,best_metrics,csv_path)
 
         
         elif hp.train_or_test == 'test':
             test(model)
 
-###########################################################################################
-# model = torch.nn.DataParallel(model, device_ids=devicess)
-# ckpt = torch.load(os.path.join(r'F:\python\py_code\Pytorch-Medical-Segmentation\logs\unet', 'best_dice_model.pt'),
-#                   map_location=lambda storage, loc: storage)
 
-# model.load_state_dict(ckpt["model"])
-# (val_loss, val_dice, val_iou, val_precision, val_recall, val_FPR, val_FNR) = (
-#     validate(100, model, val_loader, criterion, hp, metric, device="cuda"))
-
-# print(f"[Epoch {100}] "
-#       f"loss={val_loss:.4f}, "
-#       f"dice={val_dice:.4f}, "
-#       f"iou={val_iou:.4f}")
-#############################################################################################

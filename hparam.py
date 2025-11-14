@@ -35,7 +35,7 @@ class hparams:
     # source_test_dir =  './TN3k/test-image/'
     # label_test_dir =   './TN3k/test-mask/'
 
-    -source_train_dir = './DRIVE/training/images_png'
+    source_train_dir = './DRIVE/training/images_png'
     label_train_dir =  './DRIVE/training/1st_manual_png/'
     source_test_dir =  './DRIVE/test/images_png'
     label_test_dir =   './DRIVE/test/1st_manual_png/'
