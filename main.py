@@ -581,17 +581,17 @@ if __name__ == '__main__':
     # model_names = ['AttentionUnet','UNETR','DenseNet121','UCTransNet','TransFuse','MISSFormer']
     # model_names = ['MISSFormer']
     model_names = [
-    "Unet",
+    # "Unet",
     "DeepLabV3",
-    "miniseg",
-    "segnet",
-    "unetpp",
-    "SwinUNETR",
-    "AttentionUnet",
-    "UNETR",
-    "MISSFormer",
-    "UCTransNet",
-    "TransFuse"
+    # "miniseg",
+    # "segnet",
+    # "unetpp",
+    # "SwinUNETR",
+    # "AttentionUnet",
+    # "UNETR",
+    # "MISSFormer",
+    # "UCTransNet",
+    # "TransFuse"
 ]
 
 

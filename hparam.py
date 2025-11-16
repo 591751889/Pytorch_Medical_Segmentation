@@ -6,7 +6,7 @@ class hparams:
     log_dir = 'log_thy/'
     aug = None
     latest_checkpoint_file = 'checkpoint_latest.pt'
-    total_epochs = 5
+    total_epochs = 50
     epochs_per_checkpoint = 1
     batch_size = 8
     ckpt = None

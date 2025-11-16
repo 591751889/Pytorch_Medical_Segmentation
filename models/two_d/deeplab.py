@@ -203,27 +203,71 @@ class ASPP(nn.Module):
             pool = nn.functional.pad(pool, pad=padding, mode="replicate")
         return pool
 
-
+import torchvision.models as models
 class DeepLabV3(nn.Module):
-    def __init__(self, in_channels, out_channels, bn_momentum=0.01):
-        super(DeepLabV3, self).__init__()
-        self.Resnet101 = get_resnet101(in_channels, dilation=[1, 1, 1, 2], bn_momentum=bn_momentum, is_fpn=False)
-        self.ASPP = ASPP(2048, 256, [6, 12, 18], norm_act=nn.BatchNorm2d)
+    def __init__(self, in_channels=3, out_channels=1):
+        super().__init__()
+
+        # 1) 拿到 torchvision 的 resnet101
+        resnet = models.resnet101(
+            weights=models.ResNet101_Weights.DEFAULT,
+            # 可选：让 layer3/layer4 用 dilation，输出 stride=16
+            replace_stride_with_dilation=[False, True, True],
+        )
+
+        # 2) 处理第一层 conv，支持 in_channels != 3 的情况
+        if in_channels == 3:
+            self.conv1 = resnet.conv1
+        else:
+            old_conv1 = resnet.conv1
+            new_conv1 = nn.Conv2d(
+                in_channels,
+                old_conv1.out_channels,
+                kernel_size=old_conv1.kernel_size,
+                stride=old_conv1.stride,
+                padding=old_conv1.padding,
+                bias=False,
+            )
+            with torch.no_grad():
+                # 把 3 通道权重在通道维度平均，映射到 in_channels
+                new_conv1.weight[:] = old_conv1.weight.mean(dim=1, keepdim=True)
+            self.conv1 = new_conv1
+
+        self.bn1 = resnet.bn1
+        self.relu = resnet.relu
+        self.maxpool = resnet.maxpool
+
+        self.layer1 = resnet.layer1
+        self.layer2 = resnet.layer2
+        self.layer3 = resnet.layer3
+        self.layer4 = resnet.layer4  # 输出通道 2048
+
+        # 3) ASPP + 最后的分类头
+        self.aspp = ASPP(2048, 256, [6, 12, 18], norm_act=nn.BatchNorm2d)
         self.classify = nn.Conv2d(256, out_channels, 1, bias=True)
 
-    def forward(self, input):
-        x = self.Resnet101(input)
+    def forward(self, x):
+        input_size = x.shape[2:]   # (H, W) 用于最后插值回原图大小
 
-        aspp = self.ASPP(x)  # 空间金字塔池化
-        predict = self.classify(aspp)
+        # 只跑到 layer4，不要 avgpool + fc！！
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
 
-        output = F.interpolate(predict, size=input.size()[2:4], mode='bilinear', align_corners=True)
-        return output
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)       # shape: [B, 2048, H/16, W/16] 左右
 
+        x = self.aspp(x)
+        x = self.classify(x)
+        x = F.interpolate(x, size=input_size, mode='bilinear', align_corners=True)
+        return x
 
 if __name__ == '__main__':
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    input = torch.rand((4, 1, 256, 256), device=device)
-    model = DeepLabV3(in_channels=1, out_channels=1).to(device)
+    input = torch.rand((4, 3, 256, 256), device=device)
+    model = DeepLabV3(in_channels=3, out_channels=1).to(device)
     output = model(input)
     print(output.shape)
