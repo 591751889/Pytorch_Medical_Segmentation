@@ -1,12 +1,11 @@
 class hparams:
 
-
-
-    train_or_test = 'train'
-    log_dir = 'log_thy/'
+    train_or_test = 'test'
+    log_dir = 'logs/'
+    data_name = 'drive'
     aug = None
     latest_checkpoint_file = 'checkpoint_latest.pt'
-    total_epochs = 50
+    total_epochs = 5
     epochs_per_checkpoint = 1
     batch_size = 8
     ckpt = None

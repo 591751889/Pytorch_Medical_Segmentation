@@ -1,6 +1,6 @@
 import os
 
-
+from utils.model_factory import build_model
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 devices = [0]
@@ -29,7 +29,7 @@ label_test_dir = hp.label_test_dir
 source_val_dir = hp.source_val_dir
 label_val_dir = hp.label_val_dir
 
-output_dir_test = hp.output_dir_test
+
 
 
 def parse_training_args(parser):
@@ -411,7 +411,7 @@ def train(model, optimizer):
     return best_metrics
 
 
-def test(model):
+def test(model,model_name):
     parser = argparse.ArgumentParser(description='PyTorch Medical Segmentation Testing')
     parser = parse_training_args(parser)
     args, _ = parser.parse_known_args()
@@ -421,7 +421,9 @@ def test(model):
     torch.backends.cudnn.enabled = args.cudnn_enabled
     torch.backends.cudnn.benchmark = args.cudnn_benchmark
 
-    os.makedirs(output_dir_test, exist_ok=True)
+    hp.output_dir_test = os.path.join(hp.output_dir_test, hp.data_name)
+    hp.output_dir_test = os.path.join(hp.output_dir_test, model_name)
+    os.makedirs(hp.output_dir_test, exist_ok=True)
 
     model = torch.nn.DataParallel(model, device_ids=devices)
 
@@ -485,24 +487,26 @@ def test(model):
 
         # dice = metric(subj['label'][torchio.DATA].to(device), output_tensor_1.to(device))
 
-        dice = metric(subj['label'][torchio.DATA].to('cpu'), output_tensor_1.to('cpu'))
-        print('校验', subj['label'][torchio.DATA].shape, output_tensor_1.shape)
-        dice_scores.append(dice[0].item())
+        m = metric(subj['label'][torchio.DATA].to('cpu'), output_tensor_1.to('cpu'))
+        # m = metric(y.cpu(), labels.cpu())
+        dice = m["dice"]
+        print('校验', subj['label'][torchio.DATA].shape, output_tensor_1.shape,dice)
+        dice_scores.append(dice)
         Pid = os.path.basename(test_dataset.image_paths[i])
         Pids.append(Pid)
-        print(f"Dice Score for sample {i}: {dice[0].item():.4f}")
+        print(f"Dice Score for sample {i}: {dice}")
 
         if (hp.out_class == 1):
             output_image = torchio.ScalarImage(tensor=output_tensor_1.numpy() * 255, affine=affine)
             print(output_tensor_1.numpy().shape)
 
-            output_image.save(os.path.join(output_dir_test, os.path.basename(test_dataset.image_paths[i])))
+            output_image.save(os.path.join( hp.output_dir_test, os.path.basename(test_dataset.image_paths[i])))
 
     df = pd.DataFrame({
         "ID": Pids,  # 样本 ID 或文件名
         "Dice Score": dice_scores  # Dice 系数
     })
-    df.to_csv(os.path.join(output_dir_test, "dice_scores.csv"), index=False)
+    df.to_csv(os.path.join( hp.output_dir_test, "dice_scores.csv"), index=False)
     print("Dice scores saved to dice_scores.csv")
 
     # 打印平均 Dice 系数
@@ -576,13 +580,10 @@ if __name__ == '__main__':
                             pin_memory=False, drop_last=False)
 
     test_dataset = MedData_test(source_test_dir, label_test_dir)
-    # model_names=['unet-dropout','Unet_DC_ED','Unet_SK_E','Unet_SK_ED','Unet_SVD_SH','Unet_SVD_beforeINC']
-    # model_names=['Unet','Unet_DC_ED','Unet_SK_ED','Unet_SVD_SH','Unet_SKD','Unet_SKD_SVD']
-    # model_names = ['AttentionUnet','UNETR','DenseNet121','UCTransNet','TransFuse','MISSFormer']
-    # model_names = ['MISSFormer']
+
     model_names = [
-    # "Unet",
-    "DeepLabV3",
+    "Unet",
+    # "DeepLabV3",
     # "miniseg",
     # "segnet",
     # "unetpp",
@@ -606,78 +607,79 @@ if __name__ == '__main__':
 
 
     for model_name in model_names:
-        print(model_name)
-        if model_name == 'Unet':
-            from models.two_d.unet import Unet
-            model = Unet(in_channels=3, out_channels=1).to(device)
-        if model_name == 'DeepLabV3':
-            from models.two_d.deeplab import DeepLabV3
-            model = DeepLabV3(in_channels=3, out_channels=1).to(device)
-        if model_name == 'miniseg':
-            from models.two_d.miniseg import MiniSeg
-            model = MiniSeg(in_channels=3, out_channels=1).to(device)
-        if model_name == 'segnet':
-            from models.two_d.segnet import SegNet
-            model = SegNet(in_channels=3, out_channels=1).to(device)
-        if model_name == 'unetpp':
-            from models.two_d.unetpp import ResNet34UnetPlus
-            model = ResNet34UnetPlus(in_channels=3, out_channels=1).to(device)
-        
-        if model_name == 'SwinUNETR':
-            from models.two_d.swin_unetr import SwinUNETR
-            model = SwinUNETR(
-            img_size=(256, 256),     # 仍然必填，长度与 spatial_dims 一致
-            in_channels=3,
-            out_channels=1,
-            spatial_dims=2           # 声明 2‑D
-        )
-        if model_name == 'AttentionUnet':
-            from models.two_d.attention_unet import AttentionUnet
-            model = AttentionUnet(
-            spatial_dims=2,
-            in_channels=3,
-            out_channels=1,
-            channels=(32, 64, 128, 256),
-            strides=(2, 2, 2),
-            kernel_size=3,
-            up_kernel_size=3,  # ← 改回奇数
-            dropout=0.0,
-        ).to(device)
-        if model_name == 'UNETR':
-            from models.two_d.UNETR import UNETR
-            model = UNETR(
-            in_channels=3,
-            out_channels=1,        # 例如 2 类分割，可按需修改
-            img_size=(256, 256),   # 与输入空间尺寸一致
-            feature_size=16,
-            hidden_size=768,
-            mlp_dim=3072,
-            num_heads=12,
-            proj_type="conv",
-            norm_name="instance",
-            conv_block=True,
-            res_block=True,
-            dropout_rate=0.0,
-            spatial_dims=2,        # ← 关键：2D
-            qkv_bias=False,
-            save_attn=False,
-        ).to(device)
-
-        if model_name == 'MISSFormer':
-            from models.two_d.MISSFormer import MISSFormer
-            model = MISSFormer(num_classes=1, token_mlp_mode="mix_skip")
-            
-        if model_name == 'UCTransNet':
-            from models.two_d.UCTransNet import Cfg,UCTransNet
-            cfg = Cfg() # img_size 设为 256，对应上面 patch_sizes 
-            model = UCTransNet(cfg, n_channels=3, n_classes=1, img_size=256, vis=False)
-        if model_name == 'TransFuse':
-            from models.two_d.TransFuse import TransFuse_S,TransFuse_L, TransFuse_L_384
-            model =TransFuse_S(num_classes=1, pretrained=False)
+        model = build_model(model_name, device,in_channels=3,out_channels=1)
+        # if model_name == 'Unet':
+        #     from models.two_d.unet import Unet
+        #     model = Unet(in_channels=3, out_channels=1).to(device)
+        # if model_name == 'DeepLabV3':
+        #     from models.two_d.deeplab import DeepLabV3
+        #     model = DeepLabV3(in_channels=3, out_channels=1).to(device)
+        # if model_name == 'miniseg':
+        #     from models.two_d.miniseg import MiniSeg
+        #     model = MiniSeg(in_channels=3, out_channels=1).to(device)
+        # if model_name == 'segnet':
+        #     from models.two_d.segnet import SegNet
+        #     model = SegNet(in_channels=3, out_channels=1).to(device)
+        # if model_name == 'unetpp':
+        #     from models.two_d.unetpp import ResNet34UnetPlus
+        #     model = ResNet34UnetPlus(in_channels=3, out_channels=1).to(device)
+        #
+        # if model_name == 'SwinUNETR':
+        #     from models.two_d.swin_unetr import SwinUNETR
+        #     model = SwinUNETR(
+        #     img_size=(256, 256),     # 仍然必填，长度与 spatial_dims 一致
+        #     in_channels=3,
+        #     out_channels=1,
+        #     spatial_dims=2           # 声明 2‑D
+        # )
+        # if model_name == 'AttentionUnet':
+        #     from models.two_d.attention_unet import AttentionUnet
+        #     model = AttentionUnet(
+        #     spatial_dims=2,
+        #     in_channels=3,
+        #     out_channels=1,
+        #     channels=(32, 64, 128, 256),
+        #     strides=(2, 2, 2),
+        #     kernel_size=3,
+        #     up_kernel_size=3,  # ← 改回奇数
+        #     dropout=0.0,
+        # ).to(device)
+        # if model_name == 'UNETR':
+        #     from models.two_d.UNETR import UNETR
+        #     model = UNETR(
+        #     in_channels=3,
+        #     out_channels=1,        # 例如 2 类分割，可按需修改
+        #     img_size=(256, 256),   # 与输入空间尺寸一致
+        #     feature_size=16,
+        #     hidden_size=768,
+        #     mlp_dim=3072,
+        #     num_heads=12,
+        #     proj_type="conv",
+        #     norm_name="instance",
+        #     conv_block=True,
+        #     res_block=True,
+        #     dropout_rate=0.0,
+        #     spatial_dims=2,        # ← 关键：2D
+        #     qkv_bias=False,
+        #     save_attn=False,
+        # ).to(device)
+        #
+        # if model_name == 'MISSFormer':
+        #     from models.two_d.MISSFormer import MISSFormer
+        #     model = MISSFormer(num_classes=1, token_mlp_mode="mix_skip")
+        #
+        # if model_name == 'UCTransNet':
+        #     from models.two_d.UCTransNet import Cfg,UCTransNet
+        #     cfg = Cfg() # img_size 设为 256，对应上面 patch_sizes
+        #     model = UCTransNet(cfg, n_channels=3, n_classes=1, img_size=256, vis=False)
+        # if model_name == 'TransFuse':
+        #     from models.two_d.TransFuse import TransFuse_S,TransFuse_L, TransFuse_L_384
+        #     model =TransFuse_S(num_classes=1, pretrained=False)
            
 
         optimizer = torch.optim.Adam(model.parameters(), lr=hp.init_lr)
-        hp.log_dir = os.path.join('logs', model_name )
+        hp.log_dir = os.path.join(hp.log_dir, hp.data_name)
+        hp.log_dir = os.path.join(hp.log_dir, model_name )
 
 
        
@@ -688,6 +690,6 @@ if __name__ == '__main__':
 
         
         elif hp.train_or_test == 'test':
-            test(model)
+            test(model,model_name)
 
 
