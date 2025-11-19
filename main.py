@@ -17,7 +17,13 @@ import pandas as pd
 from hparam import hparams as hp
 from utils.metric import metric
 from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR, CosineAnnealingLR
-
+import torch
+from torch.optim.lr_scheduler import StepLR
+from torch.utils.tensorboard import SummaryWriter
+import argparse
+import os
+import torch
+from torchvision.utils import save_image  # 需提前安装 torchvision
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 source_train_dir = hp.source_train_dir
@@ -62,9 +68,7 @@ def parse_training_args(parser):
     return parser
 
 
-import os
-import torch
-from torchvision.utils import save_image  # 需提前安装 torchvision
+
 
 
 def _min_max_norm(t: torch.Tensor) -> torch.Tensor:
@@ -185,10 +189,6 @@ def validate(epoch, model, val_loader, criterion, hp, metric, device: str = "cud
 
 
 import os
-import torch
-from torch.optim.lr_scheduler import StepLR
-from torch.utils.tensorboard import SummaryWriter
-import argparse
 
 
 def train(model, optimizer):
@@ -423,12 +423,14 @@ def test(model,model_name):
 
     hp.output_dir_test = os.path.join(hp.output_dir_test, hp.data_name)
     hp.output_dir_test = os.path.join(hp.output_dir_test, model_name)
+    hp.output_dir_test = os.path.join(hp.output_dir_test, 'predict')
     os.makedirs(hp.output_dir_test, exist_ok=True)
 
     model = torch.nn.DataParallel(model, device_ids=devices)
 
     print("load model:", args.ckpt)
     print(os.path.join(args.log_dir, args.best_dice_model_file))
+
     ckpt = torch.load(os.path.join(args.log_dir, args.best_dice_model_file),
                       map_location=lambda storage, loc: storage)
 
@@ -512,6 +514,157 @@ def test(model,model_name):
     # 打印平均 Dice 系数
     print("Average Dice Score:", sum(dice_scores) / len(dice_scores))
 
+import os
+import argparse
+import torch
+import torchio
+from torchio.transforms import ZNormalization
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+
+def save_2d_heatmap_png(img_tensor, prob_tensor, save_path):
+    """
+    将 2D 图像和概率图画成一张 overlay 的热力图 PNG。
+
+    img_tensor: subj['source'][torchio.DATA]，形状一般是 [1, H, W, 1]
+    prob_tensor: 预测概率，形状同上 [1, H, W, 1]
+    """
+    # 转 numpy，并去掉 channel 和最后一维: [1,H,W,1] -> [H,W]
+    img_np = img_tensor.numpy()[0, :, :, 0]
+    prob_np = prob_tensor.numpy()[0, :, :, 0]
+
+    # 原图归一化到 [0,1]
+    img_min, img_max = img_np.min(), img_np.max()
+    if img_max > img_min:
+        img_norm = (img_np - img_min) / (img_max - img_min)
+    else:
+        img_norm = img_np
+
+    # 概率裁剪到 [0,1]
+    prob_norm = prob_np.clip(0, 1)
+
+    plt.figure(figsize=(4, 4))
+    plt.imshow(img_norm, cmap='gray')            # 背景：原图
+    plt.imshow(prob_norm, cmap='jet', alpha=0.5) # 前景：热力图
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300,
+                bbox_inches='tight', pad_inches=0)
+    plt.close()
+
+
+def predict_heatmap_2d(model, model_name):
+    """
+    只做二维分割的预测 + 热力图可视化，不计算 Dice。
+
+    对 test_dataset 中每个样本：
+      - 保存概率 NIfTI： <ID>_prob.nii.gz
+      - 保存中间图的 PNG 热力图： <ID>_heatmap.png
+    """
+    parser = argparse.ArgumentParser(
+        description='PyTorch Medical Segmentation 2D Heatmap Inference'
+    )
+    parser = parse_training_args(parser)
+    args, _ = parser.parse_known_args()
+    args = parser.parse_args()
+
+    # CUDNN 设置
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.enabled = args.cudnn_enabled
+    torch.backends.cudnn.benchmark = args.cudnn_benchmark
+
+    # 输出目录：.../output_dir_test/data_name/model_name/heatmap/
+    out_dir = os.path.join(hp.output_dir_test,
+                           hp.data_name,
+                           model_name,
+                           "heatmap")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # 多卡封装
+    model = torch.nn.DataParallel(model, device_ids=devices)
+
+    # 加载权重
+    print("load model:", args.ckpt)
+    ckpt_path = os.path.join(args.log_dir, args.best_dice_model_file)
+    print("ckpt path:", ckpt_path)
+    ckpt = torch.load(ckpt_path,
+                      map_location=lambda storage, loc: storage)
+    model.load_state_dict(ckpt["model"])
+    model.to(device)
+    model.eval()
+
+    znorm = ZNormalization()
+
+    # 这里我们确定就是 2D
+    patch_overlap = hp.patch_overlap
+    patch_size = hp.patch_size
+
+    for i, subj in enumerate(test_dataset.subjects):
+        # 强度归一化
+        subj = znorm(subj)
+
+        # 按 patch 采样
+        grid_sampler = torchio.inference.GridSampler(
+            subj,
+            patch_size,
+            patch_overlap,
+        )
+        print("Predicting:", test_dataset.image_paths[i])
+
+        patch_loader = torch.utils.data.DataLoader(
+            grid_sampler,
+            batch_size=args.batch
+        )
+        # 汇总 patch -> 整幅图
+        aggregator = torchio.inference.GridAggregator(grid_sampler)
+
+        with torch.no_grad():
+            for patches_batch in tqdm(patch_loader):
+                # patches_batch['source'][torchio.DATA] 形状: [B,1,H,W,1]
+                input_tensor = patches_batch['source'][torchio.DATA].to(device)
+                locations = patches_batch[torchio.LOCATION]
+
+                # 2D: 去掉最后一维，给网络 [B,1,H,W]
+                input_tensor = input_tensor.squeeze(4)
+
+                outputs = model(input_tensor)       # logits, [B,1,H,W]
+
+                # 再补回最后一维，给 TorchIO Aggregator
+                outputs = outputs.unsqueeze(4)      # [B,1,H,W,1]
+
+                # 概率图
+                probs = torch.sigmoid(outputs)      # [B,1,H,W,1]
+
+                # 汇总到整图
+                aggregator.add_batch(probs, locations)
+
+        # 得到整体概率图: [1,H,W,1]
+        output_tensor = aggregator.get_output_tensor()  # CPU tensor
+        affine = subj['source']['affine']
+
+        pid = os.path.basename(test_dataset.image_paths[i])
+        pid_noext = os.path.splitext(pid)[0]
+
+        # 1) 保存概率 NIfTI
+        prob_nifti_path = os.path.join(out_dir, f"{pid_noext}_prob.nii.gz")
+        prob_image = torchio.ScalarImage(
+            tensor=output_tensor.numpy(),
+            affine=affine
+        )
+        prob_image.save(prob_nifti_path)
+        print("Saved prob NIfTI to:", prob_nifti_path)
+
+        # 2) 保存热力图 PNG（原图 + 概率 overlay）
+        png_path = os.path.join(out_dir, f"{pid_noext}_heatmap.png")
+        save_2d_heatmap_png(
+            subj['source'][torchio.DATA],  # 原图 [1,H,W,1]
+            output_tensor,                 # 概率 [1,H,W,1]
+            png_path
+        )
+        print("Saved heatmap PNG to:", png_path)
+
+    print("All 2D heatmaps saved in:", out_dir)
 
 def set_seed(seed):
     """
@@ -608,73 +761,7 @@ if __name__ == '__main__':
 
     for model_name in model_names:
         model = build_model(model_name, device,in_channels=3,out_channels=1)
-        # if model_name == 'Unet':
-        #     from models.two_d.unet import Unet
-        #     model = Unet(in_channels=3, out_channels=1).to(device)
-        # if model_name == 'DeepLabV3':
-        #     from models.two_d.deeplab import DeepLabV3
-        #     model = DeepLabV3(in_channels=3, out_channels=1).to(device)
-        # if model_name == 'miniseg':
-        #     from models.two_d.miniseg import MiniSeg
-        #     model = MiniSeg(in_channels=3, out_channels=1).to(device)
-        # if model_name == 'segnet':
-        #     from models.two_d.segnet import SegNet
-        #     model = SegNet(in_channels=3, out_channels=1).to(device)
-        # if model_name == 'unetpp':
-        #     from models.two_d.unetpp import ResNet34UnetPlus
-        #     model = ResNet34UnetPlus(in_channels=3, out_channels=1).to(device)
-        #
-        # if model_name == 'SwinUNETR':
-        #     from models.two_d.swin_unetr import SwinUNETR
-        #     model = SwinUNETR(
-        #     img_size=(256, 256),     # 仍然必填，长度与 spatial_dims 一致
-        #     in_channels=3,
-        #     out_channels=1,
-        #     spatial_dims=2           # 声明 2‑D
-        # )
-        # if model_name == 'AttentionUnet':
-        #     from models.two_d.attention_unet import AttentionUnet
-        #     model = AttentionUnet(
-        #     spatial_dims=2,
-        #     in_channels=3,
-        #     out_channels=1,
-        #     channels=(32, 64, 128, 256),
-        #     strides=(2, 2, 2),
-        #     kernel_size=3,
-        #     up_kernel_size=3,  # ← 改回奇数
-        #     dropout=0.0,
-        # ).to(device)
-        # if model_name == 'UNETR':
-        #     from models.two_d.UNETR import UNETR
-        #     model = UNETR(
-        #     in_channels=3,
-        #     out_channels=1,        # 例如 2 类分割，可按需修改
-        #     img_size=(256, 256),   # 与输入空间尺寸一致
-        #     feature_size=16,
-        #     hidden_size=768,
-        #     mlp_dim=3072,
-        #     num_heads=12,
-        #     proj_type="conv",
-        #     norm_name="instance",
-        #     conv_block=True,
-        #     res_block=True,
-        #     dropout_rate=0.0,
-        #     spatial_dims=2,        # ← 关键：2D
-        #     qkv_bias=False,
-        #     save_attn=False,
-        # ).to(device)
-        #
-        # if model_name == 'MISSFormer':
-        #     from models.two_d.MISSFormer import MISSFormer
-        #     model = MISSFormer(num_classes=1, token_mlp_mode="mix_skip")
-        #
-        # if model_name == 'UCTransNet':
-        #     from models.two_d.UCTransNet import Cfg,UCTransNet
-        #     cfg = Cfg() # img_size 设为 256，对应上面 patch_sizes
-        #     model = UCTransNet(cfg, n_channels=3, n_classes=1, img_size=256, vis=False)
-        # if model_name == 'TransFuse':
-        #     from models.two_d.TransFuse import TransFuse_S,TransFuse_L, TransFuse_L_384
-        #     model =TransFuse_S(num_classes=1, pretrained=False)
+
            
 
         optimizer = torch.optim.Adam(model.parameters(), lr=hp.init_lr)
@@ -691,5 +778,8 @@ if __name__ == '__main__':
         
         elif hp.train_or_test == 'test':
             test(model,model_name)
+
+        elif hp.train_or_test == 'show':
+            predict_heatmap_2d(model,model_name)
 
 
