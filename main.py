@@ -428,7 +428,7 @@ def test(model,model_name):
 
     model = torch.nn.DataParallel(model, device_ids=devices)
 
-    print("load model:", args.ckpt)
+    print("load model:", os.path.join(args.log_dir, args.best_dice_model_file))
     print(os.path.join(args.log_dir, args.best_dice_model_file))
 
     ckpt = torch.load(os.path.join(args.log_dir, args.best_dice_model_file),
