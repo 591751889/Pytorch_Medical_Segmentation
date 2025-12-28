@@ -489,7 +489,9 @@ def test(model,model_name):
 
         # dice = metric(subj['label'][torchio.DATA].to(device), output_tensor_1.to(device))
 
-        m = metric(subj['label'][torchio.DATA].to('cpu'), output_tensor_1.to('cpu'))
+        y = subj['label'][torchio.DATA].to('cpu')
+        y[y != 0] = 1
+        m = metric(y, output_tensor_1.to('cpu'))
         # m = metric(y.cpu(), labels.cpu())
         dice = m["dice"]
         print('校验', subj['label'][torchio.DATA].shape, output_tensor_1.shape,dice)

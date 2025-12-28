@@ -1,6 +1,6 @@
 class hparams:
 
-    train_or_test = 'train'
+    train_or_test = 'test'
     log_dir = 'logs/'
     data_name = 'drive'
     aug = None
