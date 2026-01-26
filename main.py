@@ -24,6 +24,7 @@ import argparse
 import os
 import torch
 from torchvision.utils import save_image  # 需提前安装 torchvision
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 source_train_dir = hp.source_train_dir
@@ -34,8 +35,6 @@ label_test_dir = hp.label_test_dir
 
 source_val_dir = hp.source_val_dir
 label_val_dir = hp.label_val_dir
-
-
 
 
 def parse_training_args(parser):
@@ -66,9 +65,6 @@ def parse_training_args(parser):
     training.add_argument('--disable-uniform-initialize-bn-weight', action='store_true',
                           help='disable uniform initialization of batchnorm layer weight')
     return parser
-
-
-
 
 
 def _min_max_norm(t: torch.Tensor) -> torch.Tensor:
@@ -113,8 +109,8 @@ def validate(epoch, model, val_loader, criterion, hp, metric, device: str = "cud
 
     # ── 创建输出目录 ─────────────────────────────────────────────────────────────
     if save_outputs:
-        images_dir = os.path.join(hp.output_dir_test, os.path.join(str(epoch),"images"))
-        masks_dir = os.path.join(hp.output_dir_test, os.path.join(str(epoch),"masks"))
+        images_dir = os.path.join(hp.ori_output_dir_test, os.path.join(str(epoch), "images"))
+        masks_dir = os.path.join(hp.ori_output_dir_test, os.path.join(str(epoch), "masks"))
         os.makedirs(images_dir, exist_ok=True)
         os.makedirs(masks_dir, exist_ok=True)
 
@@ -411,7 +407,7 @@ def train(model, optimizer):
     return best_metrics
 
 
-def test(model,model_name):
+def test(model, model_name):
     parser = argparse.ArgumentParser(description='PyTorch Medical Segmentation Testing')
     parser = parse_training_args(parser)
     args, _ = parser.parse_known_args()
@@ -421,7 +417,7 @@ def test(model,model_name):
     torch.backends.cudnn.enabled = args.cudnn_enabled
     torch.backends.cudnn.benchmark = args.cudnn_benchmark
 
-    hp.output_dir_test = os.path.join(hp.output_dir_test, hp.data_name)
+    hp.output_dir_test = os.path.join(hp.ori_output_dir_test, hp.data_name)
     hp.output_dir_test = os.path.join(hp.output_dir_test, model_name)
     hp.output_dir_test = os.path.join(hp.output_dir_test, 'predict')
     os.makedirs(hp.output_dir_test, exist_ok=True)
@@ -457,7 +453,7 @@ def test(model,model_name):
             patch_size,
             patch_overlap,
         )
-        print(test_dataset.image_paths[i])
+        print('test_dataset.image_paths[i]', test_dataset.image_paths[i])
         patch_loader = torch.utils.data.DataLoader(grid_sampler, batch_size=args.batch)
         aggregator = torchio.inference.GridAggregator(grid_sampler)
         aggregator_1 = torchio.inference.GridAggregator(grid_sampler)
@@ -494,7 +490,7 @@ def test(model,model_name):
         m = metric(y, output_tensor_1.to('cpu'))
         # m = metric(y.cpu(), labels.cpu())
         dice = m["dice"]
-        print('校验', subj['label'][torchio.DATA].shape, output_tensor_1.shape,dice)
+        print('校验', subj['label'][torchio.DATA].shape, output_tensor_1.shape, dice)
         dice_scores.append(dice)
         Pid = os.path.basename(test_dataset.image_paths[i])
         Pids.append(Pid)
@@ -503,18 +499,19 @@ def test(model,model_name):
         if (hp.out_class == 1):
             output_image = torchio.ScalarImage(tensor=output_tensor_1.numpy() * 255, affine=affine)
             print(output_tensor_1.numpy().shape)
-
-            output_image.save(os.path.join( hp.output_dir_test, os.path.basename(test_dataset.image_paths[i])))
+            print('hp.output_dir_test', hp.output_dir_test)
+            output_image.save(os.path.join(hp.output_dir_test, os.path.basename(test_dataset.image_paths[i])))
 
     df = pd.DataFrame({
         "ID": Pids,  # 样本 ID 或文件名
         "Dice Score": dice_scores  # Dice 系数
     })
-    df.to_csv(os.path.join( hp.output_dir_test, "dice_scores.csv"), index=False)
+    df.to_csv(os.path.join(hp.output_dir_test, "dice_scores.csv"), index=False)
     print("Dice scores saved to dice_scores.csv")
 
     # 打印平均 Dice 系数
     print("Average Dice Score:", sum(dice_scores) / len(dice_scores))
+
 
 import os
 import argparse
@@ -547,8 +544,8 @@ def save_2d_heatmap_png(img_tensor, prob_tensor, save_path):
     prob_norm = prob_np.clip(0, 1)
 
     plt.figure(figsize=(4, 4))
-    plt.imshow(img_norm, cmap='gray')            # 背景：原图
-    plt.imshow(prob_norm, cmap='jet', alpha=0.5) # 前景：热力图
+    plt.imshow(img_norm, cmap='gray')  # 背景：原图
+    plt.imshow(prob_norm, cmap='jet', alpha=0.5)  # 前景：热力图
     plt.axis('off')
     plt.tight_layout()
     plt.savefig(save_path, dpi=300,
@@ -577,7 +574,7 @@ def predict_heatmap_2d(model, model_name):
     torch.backends.cudnn.benchmark = args.cudnn_benchmark
 
     # 输出目录：.../output_dir_test/data_name/model_name/heatmap/
-    out_dir = os.path.join(hp.output_dir_test,
+    out_dir = os.path.join(hp.ori_output_dir_test,
                            hp.data_name,
                            model_name,
                            "heatmap")
@@ -630,13 +627,13 @@ def predict_heatmap_2d(model, model_name):
                 # 2D: 去掉最后一维，给网络 [B,1,H,W]
                 input_tensor = input_tensor.squeeze(4)
 
-                outputs = model(input_tensor)       # logits, [B,1,H,W]
+                outputs = model(input_tensor)  # logits, [B,1,H,W]
 
                 # 再补回最后一维，给 TorchIO Aggregator
-                outputs = outputs.unsqueeze(4)      # [B,1,H,W,1]
+                outputs = outputs.unsqueeze(4)  # [B,1,H,W,1]
 
                 # 概率图
-                probs = torch.sigmoid(outputs)      # [B,1,H,W,1]
+                probs = torch.sigmoid(outputs)  # [B,1,H,W,1]
 
                 # 汇总到整图
                 aggregator.add_batch(probs, locations)
@@ -661,12 +658,13 @@ def predict_heatmap_2d(model, model_name):
         png_path = os.path.join(out_dir, f"{pid_noext}_heatmap.png")
         save_2d_heatmap_png(
             subj['source'][torchio.DATA],  # 原图 [1,H,W,1]
-            output_tensor,                 # 概率 [1,H,W,1]
+            output_tensor,  # 概率 [1,H,W,1]
             png_path
         )
         print("Saved heatmap PNG to:", png_path)
 
     print("All 2D heatmaps saved in:", out_dir)
+
 
 def set_seed(seed):
     """
@@ -678,8 +676,10 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True  # 确保结果的可重复性
     torch.backends.cudnn.benchmark = False  # 关闭 cuDNN 的优化，确保结果一致
 
+
 import csv
 import os
+
 
 def save_metrics_to_csv(model_name, metrics: dict, csv_path: str):
     """
@@ -737,19 +737,18 @@ if __name__ == '__main__':
     test_dataset = MedData_test(source_test_dir, label_test_dir)
 
     model_names = [
-    "Unet",
-    # "DeepLabV3",
-    # "miniseg",
-    # "segnet",
-    # "unetpp",
-    # "SwinUNETR",
-    # "AttentionUnet",
-    # "UNETR",
-    # "MISSFormer",
-    # "UCTransNet",
-    # "TransFuse"
-]
-
+        "Unet",
+        "DeepLabV3",
+        "miniseg",
+        "segnet",
+        "unetpp",
+        "SwinUNETR",
+        "AttentionUnet",
+        "UNETR",
+        "MISSFormer",
+        "UCTransNet",
+        "TransFuse"
+    ]
 
     from loss_function import DiceLoss, Binary_Loss
 
@@ -760,28 +759,22 @@ if __name__ == '__main__':
     # criterion = BCEDiceLoss().cuda()
     # criterion = BCEDiceFocalLoss().cuda()
 
-
     for model_name in model_names:
-        model = build_model(model_name, device,in_channels=3,out_channels=1)
-
-           
+        model = build_model(model_name, device, in_channels=3, out_channels=1)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=hp.init_lr)
-        hp.log_dir = os.path.join(hp.log_dir, hp.data_name)
-        hp.log_dir = os.path.join(hp.log_dir, model_name )
+        hp.log_dir = os.path.join(hp.ori_log_dir, hp.data_name)
+        hp.log_dir = os.path.join(hp.log_dir, model_name)
 
-
-       
         if hp.train_or_test == 'train':
             best_metrics = train(model, optimizer)
-            csv_path = hp.source_train_dir+'ans.csv'
-            save_metrics_to_csv(model_name,best_metrics,csv_path)
+            csv_path = hp.source_train_dir + 'ans.csv'
+            save_metrics_to_csv(model_name, best_metrics, csv_path)
+            print(hp.log_dir)
 
-        
+
         elif hp.train_or_test == 'test':
-            test(model,model_name)
+            test(model, model_name)
 
         elif hp.train_or_test == 'show':
-            predict_heatmap_2d(model,model_name)
-
-
+            predict_heatmap_2d(model, model_name)

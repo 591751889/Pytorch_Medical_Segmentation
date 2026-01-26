@@ -8,7 +8,7 @@ import torch
 from collections import OrderedDict
 import torch.nn as nn
 
-from main import output_dir_test
+
 
 BatchNorm2d = nn.BatchNorm2d
 
